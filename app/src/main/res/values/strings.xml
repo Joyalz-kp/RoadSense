@@ -1,3 +1,36 @@
 <resources>
     <string name="app_name">RoadSense</string>
+    <string name="start_new_trip">Start new trip</string>
+    <string name="trip_history">Trip history</string>
+    <string name="live_trip">Live trip</string>
+    <string name="trip_summary">Trip summary</string>
+    <string name="bump_details">Bump details</string>
+    <string name="end_trip">End trip</string>
+    <string name="share">Share</string>
+    <string name="view_bumps">View bumps</string>
+    <string name="open_in_maps">Open in Maps</string>
+    <string name="delete_all_data">Delete all data</string>
+    <string name="delete_confirm_title">Delete all trips?</string>
+    <string name="delete_confirm_message">This removes every trip and bump stored on this device.</string>
+    <string name="delete">Delete</string>
+    <string name="cancel">Cancel</string>
+    <string name="no_trips">No trips recorded yet.</string>
+    <string name="no_bumps">No bumps were recorded on this trip.</string>
+    <string name="select_bump_first">Select a bump first.</string>
+    <string name="no_maps_app">No maps app found.</string>
+    <string name="bump_counter_label">Bumps</string>
+    <string name="road_score_label">Road score</string>
+    <string name="sensor_status_format">Accelerometer: %1$s  |  GPS: %2$s</string>
+    <string name="status_active">active</string>
+    <string name="status_unavailable">unavailable</string>
+    <string name="status_waiting_fix">waiting for fix</string>
+    <string name="status_permission_denied">permission denied</string>
+    <string name="summary_duration">Duration: %1$s</string>
+    <string name="summary_distance">Distance: %1$s</string>
+    <string name="summary_bumps">Bumps: %1$d</string>
+    <string name="summary_score">Road score: %1$d / 100</string>
+    <string name="share_text">RoadSense trip on %1$s: %2$s, %3$s, %4$d bumps, road score %5$d/100.</string>
+    <string name="share_chooser">Share trip summary</string>
+    <string name="speed_format">Speed: %1$.0f km/h</string>
+    <string name="summary_avg_speed">Average speed: %1$.1f km/h</string>
 </resources>
