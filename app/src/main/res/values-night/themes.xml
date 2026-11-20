@@ -1,7 +1,4 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
-    <style name="Base.Theme.RoadSense" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your dark theme here. -->
-        <!-- <item name="colorPrimary">@color/my_dark_primary</item> -->
-    </style>
+<resources>
+    <!-- Dark window theme; the Compose UI picks its dark colours in RoadSenseTheme. -->
+    <style name="Theme.RoadSense" parent="android:Theme.Material.NoActionBar" />
 </resources>

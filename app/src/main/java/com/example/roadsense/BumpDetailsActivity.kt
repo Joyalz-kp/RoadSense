@@ -4,66 +4,91 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.view.View
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.ListView
-import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import com.example.roadsense.data.Bump
 import com.example.roadsense.data.Extras
 import com.example.roadsense.data.Fmt
 import com.example.roadsense.data.TripRepository
+import com.example.roadsense.ui.RoadSenseScaffold
+import com.example.roadsense.ui.theme.RoadSenseTheme
 
-class BumpDetailsActivity : AppCompatActivity() {
-
-    private var bumps: List<Bump> = emptyList()
+/** Every bump recorded on one trip, chosen by the trip ID passed in the Intent extra. */
+class BumpDetailsActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContentView(R.layout.activity_bump_details)
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
-            insets
-        }
 
         val tripId = intent.getLongExtra(Extras.TRIP_ID, -1L)
-        bumps = TripRepository.get(this).getBumps(tripId)
+        val bumps = TripRepository.get(this).getBumps(tripId)
 
-        val list = findViewById<ListView>(R.id.listBumps)
-        val rows = bumps.map { b ->
-            val where = if (b.hasLocation) String.format("%.5f, %.5f", b.latitude, b.longitude) else "location unknown"
-            "${Fmt.time(b.timestamp)}  |  ${severityLabel(b.severity)}\n$where"
-        }
-        list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_single_choice, rows)
-        findViewById<TextView>(R.id.tvNoBumps).visibility = if (bumps.isEmpty()) View.VISIBLE else View.GONE
-
-        findViewById<Button>(R.id.btnOpenInMaps).setOnClickListener {
-            val position = list.checkedItemPosition
-            if (position == ListView.INVALID_POSITION) {
-                Toast.makeText(this, R.string.select_bump_first, Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            val bump = bumps[position]
-            if (!bump.hasLocation) return@setOnClickListener
-            val uri = Uri.parse("geo:${bump.latitude},${bump.longitude}?q=${bump.latitude},${bump.longitude}(Bump)")
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW, uri))
-            } catch (e: ActivityNotFoundException) {
-                Toast.makeText(this, R.string.no_maps_app, Toast.LENGTH_SHORT).show()
+        setContent {
+            RoadSenseTheme {
+                BumpDetailsScreen(bumps = bumps, onOpenInMaps = { openInMaps(it) })
             }
         }
     }
 
-    private fun severityLabel(severity: Int) = when (severity) {
-        3 -> "severe"
-        2 -> "medium"
-        else -> "minor"
+    /** Implicit intent: show the bump's location in any installed maps app (geo: URI). */
+    private fun openInMaps(bump: Bump) {
+        if (!bump.hasLocation) return
+        val uri = Uri.parse("geo:${bump.latitude},${bump.longitude}?q=${bump.latitude},${bump.longitude}(Bump)")
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, R.string.no_maps_app, Toast.LENGTH_SHORT).show()
+        }
     }
+}
+
+/** Bump list: time, severity and location, with an Open in Maps button on each bump. */
+@Composable
+fun BumpDetailsScreen(bumps: List<Bump>, onOpenInMaps: (Bump) -> Unit) {
+    RoadSenseScaffold(title = stringResource(R.string.bump_details)) {
+        if (bumps.isEmpty()) {
+            Text(stringResource(R.string.no_bumps), modifier = Modifier.padding(top = 8.dp))
+        }
+        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            items(bumps, key = { it.id }) { bump ->
+                val where = if (bump.hasLocation) {
+                    String.format("%.5f, %.5f", bump.latitude, bump.longitude)
+                } else {
+                    "location unknown"
+                }
+                ListItem(
+                    headlineContent = { Text("${Fmt.time(bump.timestamp)}  |  ${severityLabel(bump.severity)}") },
+                    supportingContent = { Text(where) },
+                    trailingContent = {
+                        // Disabled when the bump has no GPS position.
+                        TextButton(onClick = { onOpenInMaps(bump) }, enabled = bump.hasLocation) {
+                            Text(stringResource(R.string.open_in_maps))
+                        }
+                    }
+                )
+                HorizontalDivider()
+            }
+        }
+    }
+}
+
+/** Severity 1-3 from the bump detector as a word. */
+private fun severityLabel(severity: Int) = when (severity) {
+    3 -> "severe"
+    2 -> "medium"
+    else -> "minor"
 }

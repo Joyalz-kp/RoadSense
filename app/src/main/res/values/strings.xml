@@ -16,7 +16,6 @@
     <string name="cancel">Cancel</string>
     <string name="no_trips">No trips recorded yet.</string>
     <string name="no_bumps">No bumps were recorded on this trip.</string>
-    <string name="select_bump_first">Select a bump first.</string>
     <string name="no_maps_app">No maps app found.</string>
     <string name="bump_counter_label">Bumps</string>
     <string name="road_score_label">Road score</string>

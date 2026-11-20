@@ -12,73 +12,91 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
-import android.widget.Button
-import android.widget.TextView
+import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
+import androidx.annotation.StringRes
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import com.example.roadsense.data.Extras
 import com.example.roadsense.data.RoadScore
 import com.example.roadsense.data.TripRepository
+import com.example.roadsense.ui.RoadScoreGauge
+import com.example.roadsense.ui.RoadSenseScaffold
+import com.example.roadsense.ui.theme.RoadSenseTheme
 import kotlin.math.abs
 import kotlin.math.sqrt
 
-class LiveTripActivity : AppCompatActivity(), SensorEventListener, LocationListener {
+/**
+ * Live trip screen. The activity owns the sensors (accelerometer and GPS) and the trip data;
+ * the values the screen shows are Compose state, so the UI redraws whenever they change.
+ */
+class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListener {
 
     private lateinit var repo: TripRepository
-    private lateinit var tvStatus: TextView
-    private lateinit var tvBumpCount: TextView
-    private lateinit var tvSpeed: TextView
-    private lateinit var gauge: RoadScoreGaugeView
-
     private lateinit var sensorManager: SensorManager
     private lateinit var locationManager: LocationManager
 
     private var tripId = -1L
     private var startTime = 0L
-    private var bumpCount = 0
     private var severitySum = 0
     private var distanceMeters = 0.0
     private var lastLocation: Location? = null
     private var lastBumpTime = 0L
-    private var speedKmh = 0f
     private var ended = false
 
     private val gravity = FloatArray(3)
     private var gravityReady = false
 
-    private var accelStatus = R.string.status_unavailable
-    private var gpsStatus = R.string.status_waiting_fix
+    // --- Compose state shown on screen (changing any of these recomposes LiveTripScreen) ---
+    private var bumpCount by mutableIntStateOf(0)
+    private var speedKmh by mutableFloatStateOf(0f)
+    private var roadScore by mutableIntStateOf(100)
+    private var accelStatus by mutableIntStateOf(R.string.status_unavailable)
+    private var gpsStatus by mutableIntStateOf(R.string.status_waiting_fix)
 
+    // User interaction: runtime location permission request
     private val locationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
                 startLocationUpdates()
             } else {
                 gpsStatus = R.string.status_permission_denied
-                updateStatus()
             }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContentView(R.layout.activity_live_trip)
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
-            insets
+        setContent {
+            RoadSenseTheme {
+                LiveTripScreen(
+                    accelStatus = accelStatus,
+                    gpsStatus = gpsStatus,
+                    bumpCount = bumpCount,
+                    speedKmh = speedKmh,
+                    roadScore = roadScore,
+                    onEndTrip = { endTrip() }
+                )
+            }
         }
-
-        tvStatus = findViewById(R.id.tvSensorStatus)
-        tvBumpCount = findViewById(R.id.tvBumpCount)
-        tvSpeed = findViewById(R.id.tvSpeed)
-        gauge = findViewById(R.id.gaugeScore)
-        findViewById<Button>(R.id.btnEndTrip).setOnClickListener { endTrip() }
+        // Pressing Back also ends (and saves) the trip.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() = endTrip()
         })
@@ -96,7 +114,6 @@ class LiveTripActivity : AppCompatActivity(), SensorEventListener, LocationListe
         } else {
             locationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-        updateStatus()
         updateUi()
     }
 
@@ -115,12 +132,10 @@ class LiveTripActivity : AppCompatActivity(), SensorEventListener, LocationListe
     private fun startLocationUpdates() {
         if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
             gpsStatus = R.string.status_unavailable
-            updateStatus()
             return
         }
         locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
         gpsStatus = R.string.status_waiting_fix
-        updateStatus()
     }
 
     // Accelerometer: estimate gravity with a low-pass filter, remove it, and keep the
@@ -166,7 +181,6 @@ class LiveTripActivity : AppCompatActivity(), SensorEventListener, LocationListe
         lastLocation?.let { distanceMeters += it.distanceTo(location) }
         lastLocation = location
         speedKmh = if (location.hasSpeed()) location.speed * 3.6f else 0f
-        updateStatus()
         updateUi()
     }
 
@@ -178,14 +192,9 @@ class LiveTripActivity : AppCompatActivity(), SensorEventListener, LocationListe
 
     override fun onProviderDisabled(provider: String) {}
 
-    private fun updateStatus() {
-        tvStatus.text = getString(R.string.sensor_status_format, getString(accelStatus), getString(gpsStatus))
-    }
-
+    /** Recalculates the live road score; the gauge redraws because roadScore is Compose state. */
     private fun updateUi() {
-        tvBumpCount.text = bumpCount.toString()
-        tvSpeed.text = getString(R.string.speed_format, speedKmh)
-        gauge.score = RoadScore.compute(distanceMeters, severitySum)
+        roadScore = RoadScore.compute(distanceMeters, severitySum)
     }
 
     private fun stopSensors() {
@@ -199,6 +208,7 @@ class LiveTripActivity : AppCompatActivity(), SensorEventListener, LocationListe
         stopSensors()
         val score = RoadScore.compute(distanceMeters, severitySum)
         repo.finishTrip(tripId, System.currentTimeMillis(), distanceMeters, bumpCount, score)
+        // Explicit intent: open the summary for this trip, passing its ID as an extra
         startActivity(Intent(this, TripSummaryActivity::class.java).putExtra(Extras.TRIP_ID, tripId))
         finish()
     }
@@ -214,5 +224,49 @@ class LiveTripActivity : AppCompatActivity(), SensorEventListener, LocationListe
         const val SEVERE_THRESHOLD = 12.0f
         const val BUMP_COOLDOWN_MS = 1000L
         const val MAX_FIX_ACCURACY_M = 50f
+    }
+}
+
+/** Live dashboard: sensor status, bump counter, speed, road-score gauge and End trip. */
+@Composable
+fun LiveTripScreen(
+    @StringRes accelStatus: Int,
+    @StringRes gpsStatus: Int,
+    bumpCount: Int,
+    speedKmh: Float,
+    roadScore: Int,
+    onEndTrip: () -> Unit
+) {
+    RoadSenseScaffold(
+        title = stringResource(R.string.live_trip),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = stringResource(
+                R.string.sensor_status_format,
+                stringResource(accelStatus),
+                stringResource(gpsStatus)
+            ),
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Text(
+            text = bumpCount.toString(),
+            style = MaterialTheme.typography.displayMedium,
+            modifier = Modifier.padding(top = 32.dp)
+        )
+        Text(stringResource(R.string.bump_counter_label), style = MaterialTheme.typography.bodyMedium)
+        Text(
+            text = stringResource(R.string.speed_format, speedKmh),
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(top = 16.dp)
+        )
+        RoadScoreGauge(score = roadScore, modifier = Modifier.padding(top = 32.dp))
+        Text(stringResource(R.string.road_score_label), style = MaterialTheme.typography.bodyMedium)
+
+        // Pushes the End trip button to the bottom of the screen.
+        Spacer(Modifier.weight(1f))
+        Button(onClick = onEndTrip, modifier = Modifier.fillMaxWidth()) {
+            Text(stringResource(R.string.end_trip))
+        }
     }
 }
