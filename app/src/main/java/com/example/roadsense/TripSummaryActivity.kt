@@ -55,9 +55,13 @@ class TripSummaryActivity : ComponentActivity() {
                     },
                     // Implicit intent: share the summary as text with any app (chooser)
                     onShare = {
-                        val text = getString(R.string.share_text, date, duration, distance, trip.bumpCount, trip.roadScore)
+                        val text = getString(
+                            R.string.share_text,
+                            date, duration, distance, trip.averageSpeedKmh, trip.bumpCount, trip.roadScore
+                        )
                         val send = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, getString(R.string.share_subject))
                             putExtra(Intent.EXTRA_TEXT, text)
                         }
                         startActivity(Intent.createChooser(send, getString(R.string.share_chooser)))
