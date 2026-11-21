@@ -1,6 +1,7 @@
 package com.example.roadsense
 
 import android.Manifest
+import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -17,6 +18,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,20 +27,20 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.viewModelScope
 import com.example.roadsense.data.Extras
 import com.example.roadsense.data.Fmt
 import com.example.roadsense.data.RoadScore
@@ -46,41 +48,31 @@ import com.example.roadsense.data.TripRepository
 import com.example.roadsense.ui.RoadScoreGauge
 import com.example.roadsense.ui.RoadSenseScaffold
 import com.example.roadsense.ui.theme.RoadSenseTheme
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlin.math.sqrt
 
 /**
- * Live trip screen. The activity owns the sensors (linear acceleration or accelerometer, and GPS) and the trip data;
- * the values the screen shows are Compose state, so the UI redraws whenever they change.
+ * Live trip screen. The activity owns the sensors (linear acceleration or accelerometer, and GPS);
+ * [LiveTripViewModel] holds the UI state and does the Room work off the main thread.
  */
 class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListener {
 
-    private lateinit var repo: TripRepository
+    private val viewModel: LiveTripViewModel by viewModels()
     private lateinit var sensorManager: SensorManager
     private lateinit var locationManager: LocationManager
 
-    private var tripId = -1L
-    private var startTime = 0L
-    private var severitySum = 0
-    private var lastLocation: Location? = null
-    // Most recent position from any provider (GPS or network); used to place bumps.
-    private var bumpLocation: Location? = null
-    private var lastBumpTime = 0L
-    private var ended = false
     private var sensorListening = false
     private var locationListening = false
 
     private val gravity = FloatArray(3)
     private var gravityReady = false
-
-    // --- Compose state shown on screen (changing any of these recomposes LiveTripScreen) ---
-    private var bumpCount by mutableIntStateOf(0)
-    private var lastSeverity by mutableIntStateOf(0) // 0 = no bump yet, 1 light, 2 medium, 3 severe
-    private var speedKmh by mutableFloatStateOf(0f)
-    private var distanceMeters by mutableDoubleStateOf(0.0)
-    private var roadScore by mutableIntStateOf(100)
-    private var accelStatus by mutableIntStateOf(R.string.status_unavailable)
-    private var gpsStatus by mutableIntStateOf(R.string.status_waiting_fix)
 
     // User interaction: runtime location permission request.
     // Android 12+ ignores a request for FINE location on its own, so ask for FINE and COARSE together.
@@ -89,14 +81,14 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
             if (result[Manifest.permission.ACCESS_FINE_LOCATION] == true) {
                 // Register only if the screen is in the started state, so a late grant
                 // cannot start GPS after onStop. onStart will pick it up if needed.
-                if (!ended && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                if (!viewModel.ended && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                     startLocationUpdates()
                 }
             } else if (result[Manifest.permission.ACCESS_COARSE_LOCATION] == true) {
                 // Approximate location is too coarse for bump positions; bumps are still counted.
-                gpsStatus = R.string.status_precise_needed
+                viewModel.updateGpsStatus(R.string.status_precise_needed)
             } else {
-                gpsStatus = R.string.status_permission_denied
+                viewModel.updateGpsStatus(R.string.status_permission_denied)
             }
         }
 
@@ -104,25 +96,13 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        repo = TripRepository.get(this)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-
-        // Create the trip row first so the screen has a valid start time to count from.
-        startTime = System.currentTimeMillis()
-        tripId = repo.startTrip(startTime)
 
         setContent {
             RoadSenseTheme {
                 LiveTripScreen(
-                    accelStatus = accelStatus,
-                    gpsStatus = gpsStatus,
-                    startTime = startTime,
-                    bumpCount = bumpCount,
-                    lastSeverity = lastSeverity,
-                    speedKmh = speedKmh,
-                    distanceMeters = distanceMeters,
-                    roadScore = roadScore,
+                    viewModel = viewModel,
                     onEndTrip = { endTrip() }
                 )
             }
@@ -138,12 +118,11 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
                 arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
             )
         }
-        updateUi()
     }
 
     override fun onStart() {
         super.onStart()
-        if (ended) return
+        if (viewModel.ended) return
         startAccelerometer()
         if (hasLocationPermission()) startLocationUpdates()
     }
@@ -152,7 +131,7 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
         // Unregister so nothing keeps running in the background, then write the
         // current totals to the existing trip row. onDestroy is not guaranteed.
         stopSensors()
-        persistTrip()
+        viewModel.persistTrip()
         super.onStop()
     }
 
@@ -168,7 +147,7 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
             ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         if (sensor != null && sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)) {
             sensorListening = true
-            accelStatus = R.string.status_active
+            viewModel.updateAccelStatus(R.string.status_active)
         }
     }
 
@@ -176,7 +155,7 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
     private fun startLocationUpdates() {
         if (locationListening) return
         if (!hasLocationPermission()) {
-            gpsStatus = R.string.status_permission_denied
+            viewModel.updateGpsStatus(R.string.status_permission_denied)
             return
         }
         // Use satellite GPS for accurate distance and speed, plus network location (Wi-Fi and
@@ -185,7 +164,7 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
             .filter { it in locationManager.allProviders }
         // Some devices and emulators have no location provider at all.
         if (providers.isEmpty()) {
-            gpsStatus = R.string.status_unavailable
+            viewModel.updateGpsStatus(R.string.status_unavailable)
             return
         }
         try {
@@ -196,25 +175,27 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
             locationListening = true
             // Start with a recent known position (under 2 minutes old) so the first bumps get a location.
             // Keep a fix already collected during this trip; do not replace it on resume.
-            if (bumpLocation == null) {
+            if (viewModel.bumpLocation == null) {
                 providers.mapNotNull { locationManager.getLastKnownLocation(it) }
                     .filter { System.currentTimeMillis() - it.time < 2 * 60 * 1000L }
                     .maxByOrNull { it.time }
-                    ?.let { bumpLocation = it }
+                    ?.let { viewModel.setInitialBumpLocation(it) }
             }
         } catch (e: SecurityException) {
-            gpsStatus = R.string.status_permission_denied
+            viewModel.updateGpsStatus(R.string.status_permission_denied)
             return
         }
-        if (bumpLocation != null) {
-            gpsStatus = R.string.status_active
+        if (viewModel.bumpLocation != null) {
+            viewModel.updateGpsStatus(R.string.status_active)
             return
         }
-        gpsStatus = if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            R.string.status_waiting_fix
-        } else {
-            R.string.status_gps_off
-        }
+        viewModel.updateGpsStatus(
+            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                R.string.status_waiting_fix
+            } else {
+                R.string.status_gps_off
+            }
+        )
     }
 
     // Motion sensor: use gravity-free acceleration (TYPE_LINEAR_ACCELERATION, or the
@@ -240,39 +221,14 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
             ly = v[1] - gravity[1]
             lz = v[2] - gravity[2]
         }
-        val magnitude = sqrt(lx * lx + ly * ly + lz * lz)
-
-        val now = System.currentTimeMillis()
-        if (magnitude >= BUMP_THRESHOLD && now - lastBumpTime >= BUMP_COOLDOWN_MS) {
-            lastBumpTime = now
-            val severity = when {
-                magnitude >= SEVERE_THRESHOLD -> 3
-                magnitude >= MEDIUM_THRESHOLD -> 2
-                else -> 1
-            }
-            // Without a GPS fix the bump is still saved, with 0,0 meaning "no location".
-            val loc = bumpLocation
-            repo.addBump(tripId, now, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, severity)
-            bumpCount++
-            lastSeverity = severity
-            severitySum += severity
-            updateUi()
-        }
+        viewModel.onLinearAcceleration(sqrt(lx * lx + ly * ly + lz * lz))
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     // GPS: trip distance, current speed and bump locations
     override fun onLocationChanged(location: Location) {
-        // Any fix, including a rough network one, is good enough to mark where a bump happened.
-        bumpLocation = location
-        gpsStatus = R.string.status_active
-        // Distance and speed only use accurate fixes, so rough network positions don't add fake distance.
-        if (location.hasAccuracy() && location.accuracy > MAX_FIX_ACCURACY_M) return
-        lastLocation?.let { distanceMeters += it.distanceTo(location) }
-        lastLocation = location
-        speedKmh = if (location.hasSpeed()) location.speed * 3.6f else 0f
-        updateUi()
+        viewModel.onLocationChanged(location)
     }
 
     @Deprecated("Required on API < 30")
@@ -280,19 +236,11 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
     override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
 
     override fun onProviderEnabled(provider: String) {
-        if (provider == LocationManager.GPS_PROVIDER) gpsStatus = R.string.status_waiting_fix
+        if (provider == LocationManager.GPS_PROVIDER) viewModel.onGpsProviderEnabled()
     }
 
     override fun onProviderDisabled(provider: String) {
-        if (provider == LocationManager.GPS_PROVIDER) {
-            gpsStatus = R.string.status_gps_off
-            speedKmh = 0f
-        }
-    }
-
-    /** Recalculates the live road score; the gauge redraws because roadScore is Compose state. */
-    private fun updateUi() {
-        roadScore = RoadScore.compute(distanceMeters, severitySum)
+        if (provider == LocationManager.GPS_PROVIDER) viewModel.onGpsProviderDisabled()
     }
 
     private fun stopSensors() {
@@ -306,29 +254,181 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
         }
     }
 
-    /** Writes the current totals onto the existing trip row. Safe to call more than once. */
-    private fun persistTrip() {
-        if (tripId <= 0L) return
-        val score = RoadScore.compute(distanceMeters, severitySum)
-        repo.finishTrip(tripId, System.currentTimeMillis(), distanceMeters, bumpCount, score)
-    }
-
     private fun endTrip() {
-        if (ended) return
-        ended = true
+        if (viewModel.ended) return
         stopSensors()
-        persistTrip()
-        // Explicit intent: open the summary for this trip, passing its ID as an extra
-        startActivity(Intent(this, TripSummaryActivity::class.java).putExtra(Extras.TRIP_ID, tripId))
-        finish()
-        // finish() will also run onStop, which persists the same row again and is harmless.
+        viewModel.endTrip { tripId ->
+            // Explicit intent: open the summary for this trip, passing its ID as an extra
+            startActivity(Intent(this, TripSummaryActivity::class.java).putExtra(Extras.TRIP_ID, tripId))
+            finish()
+            // finish() will also run onStop, which persists the same row again and is harmless.
+        }
     }
 
     override fun onDestroy() {
         // Safety net only: onStop normally already unregistered the sensors and saved.
         stopSensors()
-        persistTrip()
+        viewModel.persistTrip()
         super.onDestroy()
+    }
+}
+
+/**
+ * Holds live-trip UI state and talks to Room on a background dispatcher.
+ * The activity forwards sensor and location events here; the composable only reads state
+ * and sends the End trip event up.
+ */
+class LiveTripViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val repo = TripRepository.get(application)
+    private val tripReady = CompletableDeferred<Long>()
+    private val dbMutex = Mutex()
+
+    var tripId = -1L
+        private set
+    val startTime: Long = System.currentTimeMillis()
+    private var severitySum = 0
+    private var lastLocation: Location? = null
+    var bumpLocation: Location? = null
+        private set
+    private var lastBumpTime = 0L
+    var ended = false
+        private set
+
+    var bumpCount by mutableIntStateOf(0)
+        private set
+    var lastSeverity by mutableIntStateOf(0) // 0 = no bump yet, 1 light, 2 medium, 3 severe
+        private set
+    var speedKmh by mutableFloatStateOf(0f)
+        private set
+    var distanceMeters by mutableDoubleStateOf(0.0)
+        private set
+    var roadScore by mutableIntStateOf(100)
+        private set
+    var accelStatus by mutableIntStateOf(R.string.status_unavailable)
+        private set
+    var gpsStatus by mutableIntStateOf(R.string.status_waiting_fix)
+        private set
+    // Ticks once a second so the elapsed trip time counts up on screen.
+    var now by mutableLongStateOf(startTime)
+        private set
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val id = withContext(NonCancellable) { repo.startTrip(startTime) }
+                tripId = id
+                tripReady.complete(id)
+            } catch (e: Exception) {
+                tripReady.completeExceptionally(e)
+            }
+        }
+        viewModelScope.launch {
+            while (true) {
+                now = System.currentTimeMillis()
+                delay(1000L)
+            }
+        }
+        refreshScore()
+    }
+
+    fun updateAccelStatus(@StringRes status: Int) {
+        accelStatus = status
+    }
+
+    fun updateGpsStatus(@StringRes status: Int) {
+        gpsStatus = status
+    }
+
+    fun setInitialBumpLocation(location: Location) {
+        if (bumpLocation == null) bumpLocation = location
+    }
+
+    fun onLinearAcceleration(magnitude: Float) {
+        if (ended) return
+        val eventTime = System.currentTimeMillis()
+        if (magnitude >= BUMP_THRESHOLD && eventTime - lastBumpTime >= BUMP_COOLDOWN_MS) {
+            lastBumpTime = eventTime
+            val severity = when {
+                magnitude >= SEVERE_THRESHOLD -> 3
+                magnitude >= MEDIUM_THRESHOLD -> 2
+                else -> 1
+            }
+            // Without a GPS fix the bump is still saved, with 0,0 meaning "no location".
+            val loc = bumpLocation
+            bumpCount++
+            lastSeverity = severity
+            severitySum += severity
+            refreshScore()
+            viewModelScope.launch(Dispatchers.IO) {
+                val id = try {
+                    tripReady.await()
+                } catch (_: Exception) {
+                    return@launch
+                }
+                dbMutex.withLock {
+                    repo.addBump(id, eventTime, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, severity)
+                }
+            }
+        }
+    }
+
+    fun onLocationChanged(location: Location) {
+        // Any fix, including a rough network one, is good enough to mark where a bump happened.
+        bumpLocation = location
+        gpsStatus = R.string.status_active
+        // Distance and speed only use accurate fixes, so rough network positions don't add fake distance.
+        if (location.hasAccuracy() && location.accuracy > MAX_FIX_ACCURACY_M) return
+        lastLocation?.let { distanceMeters += it.distanceTo(location) }
+        lastLocation = location
+        speedKmh = if (location.hasSpeed()) location.speed * 3.6f else 0f
+        refreshScore()
+    }
+
+    fun onGpsProviderEnabled() {
+        gpsStatus = R.string.status_waiting_fix
+    }
+
+    fun onGpsProviderDisabled() {
+        gpsStatus = R.string.status_gps_off
+        speedKmh = 0f
+    }
+
+    /** Recalculates the live road score; the gauge redraws because roadScore is Compose state. */
+    private fun refreshScore() {
+        roadScore = RoadScore.compute(distanceMeters, severitySum)
+    }
+
+    /** Writes the current totals onto the existing trip row. Safe to call more than once. */
+    fun persistTrip() {
+        viewModelScope.launch(Dispatchers.IO) {
+            withContext(NonCancellable) { persistNow() }
+        }
+    }
+
+    fun endTrip(onSaved: (Long) -> Unit) {
+        if (ended) return
+        ended = true
+        viewModelScope.launch(Dispatchers.IO) {
+            withContext(NonCancellable) { persistNow() }
+            val id = tripId
+            withContext(Dispatchers.Main) {
+                if (id > 0L) onSaved(id)
+            }
+        }
+    }
+
+    private suspend fun persistNow() {
+        val id = try {
+            tripReady.await()
+        } catch (_: Exception) {
+            return
+        }
+        if (id <= 0L) return
+        dbMutex.withLock {
+            val score = RoadScore.compute(distanceMeters, severitySum)
+            repo.finishTrip(id, System.currentTimeMillis(), distanceMeters, bumpCount, score)
+        }
     }
 
     private companion object {
@@ -346,26 +446,10 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
  */
 @Composable
 fun LiveTripScreen(
-    @StringRes accelStatus: Int,
-    @StringRes gpsStatus: Int,
-    startTime: Long,
-    bumpCount: Int,
-    lastSeverity: Int,
-    speedKmh: Float,
-    distanceMeters: Double,
-    roadScore: Int,
+    viewModel: LiveTripViewModel,
     onEndTrip: () -> Unit
 ) {
-    // Clock that ticks once a second so the elapsed trip time counts up on screen.
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            now = System.currentTimeMillis()
-            delay(1000L)
-        }
-    }
-
-    val severityText = when (lastSeverity) {
+    val severityText = when (viewModel.lastSeverity) {
         3 -> R.string.severity_severe
         2 -> R.string.severity_medium
         1 -> R.string.severity_light
@@ -379,13 +463,13 @@ fun LiveTripScreen(
         Text(
             text = stringResource(
                 R.string.sensor_status_format,
-                stringResource(accelStatus),
-                stringResource(gpsStatus)
+                stringResource(viewModel.accelStatus),
+                stringResource(viewModel.gpsStatus)
             ),
             style = MaterialTheme.typography.bodyMedium
         )
         Text(
-            text = bumpCount.toString(),
+            text = viewModel.bumpCount.toString(),
             style = MaterialTheme.typography.displayMedium,
             modifier = Modifier.padding(top = 16.dp)
         )
@@ -395,19 +479,22 @@ fun LiveTripScreen(
             style = MaterialTheme.typography.bodyMedium
         )
         Text(
-            text = stringResource(R.string.speed_format, speedKmh),
+            text = stringResource(R.string.speed_format, viewModel.speedKmh),
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(top = 12.dp)
         )
         Text(
-            text = stringResource(R.string.summary_distance, Fmt.distance(distanceMeters)),
+            text = stringResource(R.string.summary_distance, Fmt.distance(viewModel.distanceMeters)),
             style = MaterialTheme.typography.bodyLarge
         )
         Text(
-            text = stringResource(R.string.summary_duration, Fmt.duration(maxOf(0L, now - startTime))),
+            text = stringResource(
+                R.string.summary_duration,
+                Fmt.duration(maxOf(0L, viewModel.now - viewModel.startTime))
+            ),
             style = MaterialTheme.typography.bodyLarge
         )
-        RoadScoreGauge(score = roadScore, modifier = Modifier.padding(top = 12.dp))
+        RoadScoreGauge(score = viewModel.roadScore, modifier = Modifier.padding(top = 12.dp))
         Text(stringResource(R.string.road_score_label), style = MaterialTheme.typography.bodyMedium)
 
         // Pushes the End trip button to the bottom of the screen.
