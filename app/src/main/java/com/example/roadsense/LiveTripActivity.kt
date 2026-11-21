@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import com.example.roadsense.data.Extras
 import com.example.roadsense.data.Fmt
 import com.example.roadsense.data.RoadScore
@@ -66,6 +67,8 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
     private var bumpLocation: Location? = null
     private var lastBumpTime = 0L
     private var ended = false
+    private var sensorListening = false
+    private var locationListening = false
 
     private val gravity = FloatArray(3)
     private var gravityReady = false
@@ -84,7 +87,11 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
     private val locationPermission =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             if (result[Manifest.permission.ACCESS_FINE_LOCATION] == true) {
-                startLocationUpdates()
+                // Register only if the screen is in the started state, so a late grant
+                // cannot start GPS after onStop. onStart will pick it up if needed.
+                if (!ended && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    startLocationUpdates()
+                }
             } else if (result[Manifest.permission.ACCESS_COARSE_LOCATION] == true) {
                 // Approximate location is too coarse for bump positions; bumps are still counted.
                 gpsStatus = R.string.status_precise_needed
@@ -125,10 +132,8 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
             override fun handleOnBackPressed() = endTrip()
         })
 
-        startAccelerometer()
-        if (hasLocationPermission()) {
-            startLocationUpdates()
-        } else {
+        // Sensors are started in onStart. Ask for location permission once here.
+        if (!hasLocationPermission()) {
             locationPermission.launch(
                 arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
             )
@@ -136,22 +141,40 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
         updateUi()
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (ended) return
+        startAccelerometer()
+        if (hasLocationPermission()) startLocationUpdates()
+    }
+
+    override fun onStop() {
+        // Unregister so nothing keeps running in the background, then write the
+        // current totals to the existing trip row. onDestroy is not guaranteed.
+        stopSensors()
+        persistTrip()
+        super.onStop()
+    }
+
     private fun hasLocationPermission() =
         ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
 
     private fun startAccelerometer() {
+        if (sensorListening) return
         // Prefer Android's gravity-free linear acceleration sensor; fall back to the raw
         // accelerometer with a low-pass gravity estimate on devices that do not have it.
         val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
             ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         if (sensor != null && sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)) {
+            sensorListening = true
             accelStatus = R.string.status_active
         }
     }
 
     @Suppress("MissingPermission")
     private fun startLocationUpdates() {
+        if (locationListening) return
         if (!hasLocationPermission()) {
             gpsStatus = R.string.status_permission_denied
             return
@@ -170,11 +193,15 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
             for (provider in providers) {
                 locationManager.requestLocationUpdates(provider, 1000L, 0f, this)
             }
+            locationListening = true
             // Start with a recent known position (under 2 minutes old) so the first bumps get a location.
-            providers.mapNotNull { locationManager.getLastKnownLocation(it) }
-                .filter { System.currentTimeMillis() - it.time < 2 * 60 * 1000L }
-                .maxByOrNull { it.time }
-                ?.let { bumpLocation = it }
+            // Keep a fix already collected during this trip; do not replace it on resume.
+            if (bumpLocation == null) {
+                providers.mapNotNull { locationManager.getLastKnownLocation(it) }
+                    .filter { System.currentTimeMillis() - it.time < 2 * 60 * 1000L }
+                    .maxByOrNull { it.time }
+                    ?.let { bumpLocation = it }
+            }
         } catch (e: SecurityException) {
             gpsStatus = R.string.status_permission_denied
             return
@@ -269,30 +296,38 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
     }
 
     private fun stopSensors() {
-        sensorManager.unregisterListener(this)
-        locationManager.removeUpdates(this)
+        if (sensorListening) {
+            sensorManager.unregisterListener(this)
+            sensorListening = false
+        }
+        if (locationListening) {
+            locationManager.removeUpdates(this)
+            locationListening = false
+        }
     }
 
-    /** Stops the sensors and saves the trip to Room exactly once. */
-    private fun saveTrip() {
-        if (ended) return
-        ended = true
-        stopSensors()
+    /** Writes the current totals onto the existing trip row. Safe to call more than once. */
+    private fun persistTrip() {
+        if (tripId <= 0L) return
         val score = RoadScore.compute(distanceMeters, severitySum)
         repo.finishTrip(tripId, System.currentTimeMillis(), distanceMeters, bumpCount, score)
     }
 
     private fun endTrip() {
         if (ended) return
-        saveTrip()
+        ended = true
+        stopSensors()
+        persistTrip()
         // Explicit intent: open the summary for this trip, passing its ID as an extra
         startActivity(Intent(this, TripSummaryActivity::class.java).putExtra(Extras.TRIP_ID, tripId))
         finish()
+        // finish() will also run onStop, which persists the same row again and is harmless.
     }
 
     override fun onDestroy() {
-        // If the screen is closed some other way (not End trip or Back), still keep the trip.
-        if (!ended) saveTrip()
+        // Safety net only: onStop normally already unregistered the sensors and saved.
+        stopSensors()
+        persistTrip()
         super.onDestroy()
     }
 
