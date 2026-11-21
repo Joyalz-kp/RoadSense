@@ -6,6 +6,8 @@
     <string name="trip_summary">Trip summary</string>
     <string name="bump_details">Bump details</string>
     <string name="end_trip">End trip</string>
+    <string name="pause">Pause</string>
+    <string name="resume">Resume</string>
     <string name="share">Share</string>
     <string name="view_bumps">View bumps</string>
     <string name="open_in_maps">Open in Maps</string>
@@ -26,6 +28,7 @@
     <string name="status_permission_denied">permission denied</string>
     <string name="status_gps_off">turned off</string>
     <string name="status_precise_needed">precise location needed</string>
+    <string name="status_paused">Paused</string>
     <string name="last_bump_format">Last bump: %1$s</string>
     <string name="severity_none">none yet</string>
     <string name="severity_light">light</string>

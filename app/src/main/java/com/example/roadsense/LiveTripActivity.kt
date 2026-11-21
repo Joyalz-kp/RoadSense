@@ -20,6 +20,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.annotation.StringRes
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -32,6 +34,7 @@ import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -294,6 +297,11 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
     private var lastBumpTime = 0L
     var ended = false
         private set
+    var isPaused by mutableStateOf(false)
+        private set
+    // Total time spent paused, not including an in-progress pause.
+    private var pausedAccumulatedMs = 0L
+    private var pauseStartedAt = 0L
 
     var bumpCount by mutableIntStateOf(0)
         private set
@@ -325,7 +333,7 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         }
         viewModelScope.launch {
             while (true) {
-                now = System.currentTimeMillis()
+                if (!isPaused && !ended) now = System.currentTimeMillis()
                 delay(1000L)
             }
         }
@@ -344,8 +352,39 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         if (bumpLocation == null) bumpLocation = location
     }
 
-    fun onLinearAcceleration(magnitude: Float) {
+    fun togglePause() {
         if (ended) return
+        val at = System.currentTimeMillis()
+        if (isPaused) {
+            pausedAccumulatedMs += at - pauseStartedAt
+            pauseStartedAt = 0L
+            // Drop the last GPS point so distance does not jump by the pause gap.
+            lastLocation = null
+            speedKmh = 0f
+            isPaused = false
+            now = at
+        } else {
+            pauseStartedAt = at
+            lastLocation = null
+            speedKmh = 0f
+            now = at
+            isPaused = true
+        }
+    }
+
+    /** Elapsed time shown on screen: wall time minus time spent paused. */
+    fun elapsedMs(): Long = maxOf(0L, now - startTime - pausedAccumulatedMs)
+
+    /** Active time up to now, including an in-progress pause. Used when saving. */
+    private fun activeElapsedMs(): Long {
+        val at = System.currentTimeMillis()
+        var paused = pausedAccumulatedMs
+        if (isPaused && pauseStartedAt > 0L) paused += at - pauseStartedAt
+        return maxOf(0L, at - startTime - paused)
+    }
+
+    fun onLinearAcceleration(magnitude: Float) {
+        if (ended || isPaused) return
         val eventTime = System.currentTimeMillis()
         if (magnitude >= BUMP_THRESHOLD && eventTime - lastBumpTime >= BUMP_COOLDOWN_MS) {
             lastBumpTime = eventTime
@@ -374,6 +413,12 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun onLocationChanged(location: Location) {
+        if (ended) return
+        if (isPaused) {
+            // Ignore movement while paused and forget the last point so resume does not jump.
+            lastLocation = null
+            return
+        }
         // Any fix, including a rough network one, is good enough to mark where a bump happened.
         bumpLocation = location
         gpsStatus = R.string.status_active
@@ -427,7 +472,10 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         if (id <= 0L) return
         dbMutex.withLock {
             val score = RoadScore.compute(distanceMeters, severitySum)
-            repo.finishTrip(id, System.currentTimeMillis(), distanceMeters, bumpCount, score)
+            // Store an endTime such that endTime - startTime equals active (unpaused) time.
+            // The live duration excludes pauses; this keeps the saved duration in line
+            // without a schema change. endTime is not shown as a clock time.
+            repo.finishTrip(id, startTime + activeElapsedMs(), distanceMeters, bumpCount, score)
         }
     }
 
@@ -442,7 +490,7 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
 
 /**
  * Live dashboard: sensor status, bump counter and last bump severity, speed, distance,
- * elapsed time, road-score gauge and End trip.
+ * elapsed time, road-score gauge, Pause/Resume and End trip.
  */
 @Composable
 fun LiveTripScreen(
@@ -490,17 +538,36 @@ fun LiveTripScreen(
         Text(
             text = stringResource(
                 R.string.summary_duration,
-                Fmt.duration(maxOf(0L, viewModel.now - viewModel.startTime))
+                Fmt.duration(viewModel.elapsedMs())
             ),
             style = MaterialTheme.typography.bodyLarge
         )
         RoadScoreGauge(score = viewModel.roadScore, modifier = Modifier.padding(top = 12.dp))
         Text(stringResource(R.string.road_score_label), style = MaterialTheme.typography.bodyMedium)
+        if (viewModel.isPaused) {
+            Text(
+                text = stringResource(R.string.status_paused),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
 
-        // Pushes the End trip button to the bottom of the screen.
+        // Pushes the Pause/Resume and End trip buttons to the bottom of the screen.
         Spacer(Modifier.weight(1f))
-        Button(onClick = onEndTrip, modifier = Modifier.fillMaxWidth()) {
-            Text(stringResource(R.string.end_trip))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Button(
+                onClick = { viewModel.togglePause() },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(stringResource(if (viewModel.isPaused) R.string.resume else R.string.pause))
+            }
+            Button(onClick = onEndTrip, modifier = Modifier.weight(1f)) {
+                Text(stringResource(R.string.end_trip))
+            }
         }
     }
 }
