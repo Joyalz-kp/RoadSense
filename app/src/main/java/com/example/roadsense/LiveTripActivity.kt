@@ -46,11 +46,10 @@ import com.example.roadsense.ui.RoadScoreGauge
 import com.example.roadsense.ui.RoadSenseScaffold
 import com.example.roadsense.ui.theme.RoadSenseTheme
 import kotlinx.coroutines.delay
-import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
- * Live trip screen. The activity owns the sensors (accelerometer and GPS) and the trip data;
+ * Live trip screen. The activity owns the sensors (linear acceleration or accelerometer, and GPS) and the trip data;
  * the values the screen shows are Compose state, so the UI redraws whenever they change.
  */
 class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListener {
@@ -142,8 +141,11 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
             PackageManager.PERMISSION_GRANTED
 
     private fun startAccelerometer() {
-        val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        if (accel != null && sensorManager.registerListener(this, accel, SensorManager.SENSOR_DELAY_GAME)) {
+        // Prefer Android's gravity-free linear acceleration sensor; fall back to the raw
+        // accelerometer with a low-pass gravity estimate on devices that do not have it.
+        val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        if (sensor != null && sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)) {
             accelStatus = R.string.status_active
         }
     }
@@ -188,30 +190,37 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
         }
     }
 
-    // Accelerometer: estimate gravity with a low-pass filter, remove it, and keep the
-    // component of the remaining jolt along the gravity (vertical) direction.
+    // Motion sensor: use gravity-free acceleration (TYPE_LINEAR_ACCELERATION, or the
+    // raw accelerometer with a low-pass gravity estimate) and take the 3-axis magnitude.
     override fun onSensorChanged(event: SensorEvent) {
         val v = event.values
-        if (!gravityReady) {
-            for (i in 0..2) gravity[i] = v[i]
-            gravityReady = true
-            return
+        val lx: Float
+        val ly: Float
+        val lz: Float
+        if (event.sensor.type == Sensor.TYPE_LINEAR_ACCELERATION) {
+            lx = v[0]
+            ly = v[1]
+            lz = v[2]
+        } else {
+            if (!gravityReady) {
+                for (i in 0..2) gravity[i] = v[i]
+                gravityReady = true
+                return
+            }
+            val alpha = 0.9f
+            for (i in 0..2) gravity[i] = alpha * gravity[i] + (1 - alpha) * v[i]
+            lx = v[0] - gravity[0]
+            ly = v[1] - gravity[1]
+            lz = v[2] - gravity[2]
         }
-        val alpha = 0.9f
-        for (i in 0..2) gravity[i] = alpha * gravity[i] + (1 - alpha) * v[i]
-        val lx = v[0] - gravity[0]
-        val ly = v[1] - gravity[1]
-        val lz = v[2] - gravity[2]
-        val gNorm = sqrt(gravity[0] * gravity[0] + gravity[1] * gravity[1] + gravity[2] * gravity[2])
-        if (gNorm < 1f) return
-        val vertical = abs((lx * gravity[0] + ly * gravity[1] + lz * gravity[2]) / gNorm)
+        val magnitude = sqrt(lx * lx + ly * ly + lz * lz)
 
         val now = System.currentTimeMillis()
-        if (vertical >= BUMP_THRESHOLD && now - lastBumpTime >= BUMP_COOLDOWN_MS) {
+        if (magnitude >= BUMP_THRESHOLD && now - lastBumpTime >= BUMP_COOLDOWN_MS) {
             lastBumpTime = now
             val severity = when {
-                vertical >= SEVERE_THRESHOLD -> 3
-                vertical >= MEDIUM_THRESHOLD -> 2
+                magnitude >= SEVERE_THRESHOLD -> 3
+                magnitude >= MEDIUM_THRESHOLD -> 2
                 else -> 1
             }
             // Without a GPS fix the bump is still saved, with 0,0 meaning "no location".
@@ -288,7 +297,7 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
     }
 
     private companion object {
-        const val BUMP_THRESHOLD = 4.0f // m/s^2 vertical jolt with gravity removed
+        const val BUMP_THRESHOLD = 4.0f // m/s^2 gravity-free acceleration magnitude
         const val MEDIUM_THRESHOLD = 8.0f
         const val SEVERE_THRESHOLD = 12.0f
         const val BUMP_COOLDOWN_MS = 1000L
