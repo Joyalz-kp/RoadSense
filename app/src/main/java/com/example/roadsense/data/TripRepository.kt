@@ -12,6 +12,8 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.max
@@ -55,6 +57,24 @@ data class Bump(
     val hasLocation: Boolean get() = !(latitude == 0.0 && longitude == 0.0)
 }
 
+@Entity(
+    tableName = "RoutePoint",
+    foreignKeys = [ForeignKey(
+        entity = Trip::class,
+        parentColumns = ["id"],
+        childColumns = ["tripId"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index("tripId")]
+)
+data class RoutePoint(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val tripId: Long,
+    val latitude: Double,
+    val longitude: Double,
+    val timestamp: Long
+)
+
 object RoadScore {
     /** 100 = smooth. Penalty grows with the summed bump severity per kilometre travelled. */
     fun compute(distanceMeters: Double, severitySum: Int): Int {
@@ -62,6 +82,14 @@ object RoadScore {
         val penalty = severitySum / km * 5.0
         return (100.0 - penalty).coerceIn(0.0, 100.0).toInt()
     }
+
+    /** ARGB colour for a road score: red below 50, amber from 50 to 89, green from 90 up. */
+    fun color(score: Int): Int = when {
+        score < 50 -> 0xFFD32F2F.toInt()
+        score < 90 -> 0xFFF57C00.toInt()
+        else -> 0xFF388E3C.toInt()
+    }
+
 }
 
 object Fmt {
@@ -105,23 +133,50 @@ interface TripDao {
 
     @Query("DELETE FROM Trip")
     fun deleteAllTrips()
+
+    @Insert
+    fun insertRoutePoint(point: RoutePoint): Long
+
+    @Query("SELECT * FROM RoutePoint WHERE tripId = :tripId ORDER BY timestamp ASC")
+    fun getRoutePoints(tripId: Long): List<RoutePoint>
+
+    @Query("SELECT * FROM RoutePoint ORDER BY tripId ASC, timestamp ASC")
+    fun getAllRoutePoints(): List<RoutePoint>
+
+    @Query("SELECT * FROM Bump ORDER BY tripId ASC, timestamp ASC")
+    fun getAllBumps(): List<Bump>
 }
 
-@Database(entities = [Trip::class, Bump::class], version = 1, exportSchema = false)
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `RoutePoint` (" +
+                "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                "`tripId` INTEGER NOT NULL, " +
+                "`latitude` REAL NOT NULL, " +
+                "`longitude` REAL NOT NULL, " +
+                "`timestamp` INTEGER NOT NULL, " +
+                "FOREIGN KEY(`tripId`) REFERENCES `Trip`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_RoutePoint_tripId` ON `RoutePoint` (`tripId`)")
+    }
+}
+
+@Database(entities = [Trip::class, Bump::class, RoutePoint::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun tripDao(): TripDao
 }
 
 /**
- * Room-backed storage for the two tables in the proposal: Trip and Bump.
- * Queries are small and run on the main thread (allowMainThreadQueries) to keep the
- * activities simple at this milestone; moving them to a background thread is a later step.
+ * Room-backed storage for the Trip, Bump and RoutePoint tables.
+ * Live trip and map reads run off the main thread; allowMainThreadQueries remains
+ * for the older screens that still query on the main thread.
  */
 class TripRepository private constructor(context: Context) {
 
     private val dao: TripDao = Room.databaseBuilder(
         context.applicationContext, AppDatabase::class.java, "roadsense_room.db"
-    ).allowMainThreadQueries().build().tripDao()
+    ).addMigrations(MIGRATION_1_2).allowMainThreadQueries().build().tripDao()
 
     fun startTrip(startTime: Long): Long = dao.insertTrip(Trip(startTime = startTime))
 
@@ -139,7 +194,19 @@ class TripRepository private constructor(context: Context) {
 
     fun getBumps(tripId: Long): List<Bump> = dao.getBumps(tripId)
 
-    /** Deletes every trip; its bumps go with it (cascade). */
+    fun addRoutePoint(tripId: Long, timestamp: Long, latitude: Double, longitude: Double) {
+        dao.insertRoutePoint(
+            RoutePoint(tripId = tripId, timestamp = timestamp, latitude = latitude, longitude = longitude)
+        )
+    }
+
+    fun getRoutePoints(tripId: Long): List<RoutePoint> = dao.getRoutePoints(tripId)
+
+    fun getAllRoutePoints(): List<RoutePoint> = dao.getAllRoutePoints()
+
+    fun getAllBumps(): List<Bump> = dao.getAllBumps()
+
+    /** Deletes every trip; its bumps and route points go with it (cascade). */
     fun deleteAll() = dao.deleteAllTrips()
 
     companion object {

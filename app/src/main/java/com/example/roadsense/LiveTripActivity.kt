@@ -295,6 +295,7 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
     var bumpLocation: Location? = null
         private set
     private var lastBumpTime = 0L
+    private var lastRoutePoint: Location? = null
     var ended = false
         private set
     var isPaused by mutableStateOf(false)
@@ -428,6 +429,45 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         lastLocation = location
         speedKmh = if (location.hasSpeed()) location.speed * 3.6f else 0f
         refreshScore()
+        maybeSaveRoutePoint(location)
+    }
+
+    private fun maybeSaveRoutePoint(location: Location) {
+        // Always keep the first accurate fix, even if later spacing is 20 m.
+        if (!shouldSaveRoutePoint(location, force = false)) return
+        lastRoutePoint = Location(location)
+        val lat = location.latitude
+        val lng = location.longitude
+        val time = if (location.time > 0L) location.time else System.currentTimeMillis()
+        viewModelScope.launch(Dispatchers.IO) {
+            val id = try {
+                tripReady.await()
+            } catch (_: Exception) {
+                return@launch
+            }
+            dbMutex.withLock {
+                repo.addRoutePoint(id, time, lat, lng)
+            }
+        }
+    }
+
+    /** True for the first point, or when the fix is at least 20 m from the last saved one, or when forced. */
+    private fun shouldSaveRoutePoint(location: Location, force: Boolean): Boolean {
+        val previous = lastRoutePoint
+        if (previous == null) return true
+        if (previous.latitude == location.latitude && previous.longitude == location.longitude) return false
+        if (force) return true
+        return previous.distanceTo(location) >= ROUTE_MIN_SPACING_M
+    }
+
+    /** Appends the last accurate fix so the drawn road reaches the trip's end point. */
+    private fun saveLastRoutePointLocked(tripId: Long) {
+        val location = lastLocation ?: return
+        if (location.hasAccuracy() && location.accuracy > MAX_FIX_ACCURACY_M) return
+        if (!shouldSaveRoutePoint(location, force = true)) return
+        lastRoutePoint = Location(location)
+        val time = if (location.time > 0L) location.time else System.currentTimeMillis()
+        repo.addRoutePoint(tripId, time, location.latitude, location.longitude)
     }
 
     fun onGpsProviderEnabled() {
@@ -471,6 +511,7 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         }
         if (id <= 0L) return
         dbMutex.withLock {
+            saveLastRoutePointLocked(id)
             val score = RoadScore.compute(distanceMeters, severitySum)
             // Store an endTime such that endTime - startTime equals active (unpaused) time.
             // The live duration excludes pauses; this keeps the saved duration in line
@@ -485,6 +526,7 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         const val SEVERE_THRESHOLD = 12.0f
         const val BUMP_COOLDOWN_MS = 1000L
         const val MAX_FIX_ACCURACY_M = 50f
+        const val ROUTE_MIN_SPACING_M = 20f
     }
 }
 

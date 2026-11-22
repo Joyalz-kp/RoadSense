@@ -44,7 +44,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** Two large buttons in the middle of the screen. */
+/** Large buttons in the middle of the screen. */
 @Composable
 fun HomeScreen(onStartTrip: () -> Unit, onOpenHistory: () -> Unit) {
     Scaffold { innerPadding ->

@@ -11,6 +11,7 @@ composeBom = "2026.11.01"
 activityCompose = "1.13.0"
 room = "2.8.5"
 ksp = "2.3.13"
+osmdroid = "6.1.20"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -29,6 +30,8 @@ androidx-activity-compose = { group = "androidx.activity", name = "activity-comp
 
 androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+
+osmdroid-android = { group = "org.osmdroid", name = "osmdroid-android", version.ref = "osmdroid" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

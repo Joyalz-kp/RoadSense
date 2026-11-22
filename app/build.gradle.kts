@@ -47,6 +47,9 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     ksp(libs.androidx.room.compiler)
 
+    // OpenStreetMap (in-app road map, no API key)
+    implementation(libs.osmdroid.android)
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
