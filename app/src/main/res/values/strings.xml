@@ -28,6 +28,9 @@
     <string name="map_bump_info">Bump: %1$s</string>
     <string name="bump_counter_label">Bumps</string>
     <string name="road_score_label">Road score</string>
+    <string name="road_quality_good">Road quality: Good</string>
+    <string name="road_quality_fair">Road quality: Fair</string>
+    <string name="road_quality_poor">Road quality: Poor</string>
     <string name="sensor_status_format">Accelerometer: %1$s  |  GPS: %2$s</string>
     <string name="status_active">active</string>
     <string name="status_unavailable">unavailable</string>
