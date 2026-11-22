@@ -12,7 +12,11 @@ import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
@@ -125,6 +129,7 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
 
     override fun onStart() {
         super.onStart()
+        viewModel.onSevereBump = { vibrateSevereBump() }
         if (viewModel.ended) return
         startAccelerometer()
         if (hasLocationPermission()) startLocationUpdates()
@@ -133,9 +138,21 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
     override fun onStop() {
         // Unregister so nothing keeps running in the background, then write the
         // current totals to the existing trip row. onDestroy is not guaranteed.
+        viewModel.onSevereBump = null
         stopSensors()
         viewModel.persistTrip()
         super.onStop()
+    }
+
+    private fun vibrateSevereBump() {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService(VibratorManager::class.java).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(VIBRATOR_SERVICE) as Vibrator
+        }
+        if (!vibrator.hasVibrator()) return
+        vibrator.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE))
     }
 
     private fun hasLocationPermission() =
@@ -286,6 +303,8 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
     private val repo = TripRepository.get(application)
     private val tripReady = CompletableDeferred<Long>()
     private val dbMutex = Mutex()
+    // Set by the activity; vibrates only when a severe bump is actually recorded.
+    var onSevereBump: (() -> Unit)? = null
 
     var tripId = -1L
         private set
@@ -407,6 +426,7 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
             lastSeverity = severity
             severitySum += severity
             refreshScore()
+            if (severity == 3) onSevereBump?.invoke()
             viewModelScope.launch(Dispatchers.IO) {
                 val id = try {
                     tripReady.await()
