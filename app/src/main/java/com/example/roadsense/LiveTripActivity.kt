@@ -292,6 +292,8 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
     val startTime: Long = System.currentTimeMillis()
     private var severitySum = 0
     private var lastLocation: Location? = null
+    private var lastFixAt = 0L
+    private var currentSpeedMps = 0f
     var bumpLocation: Location? = null
         private set
     private var lastBumpTime = 0L
@@ -361,12 +363,16 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
             pauseStartedAt = 0L
             // Drop the last GPS point so distance does not jump by the pause gap.
             lastLocation = null
+            lastFixAt = 0L
+            currentSpeedMps = 0f
             speedKmh = 0f
             isPaused = false
             now = at
         } else {
             pauseStartedAt = at
             lastLocation = null
+            lastFixAt = 0L
+            currentSpeedMps = 0f
             speedKmh = 0f
             now = at
             isPaused = true
@@ -388,13 +394,14 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         if (ended || isPaused) return
         val eventTime = System.currentTimeMillis()
         if (magnitude >= BUMP_THRESHOLD && eventTime - lastBumpTime >= BUMP_COOLDOWN_MS) {
+            // Ignore shakes while stopped or when GPS speed is stale; don't start the cooldown.
+            if (!isVehicleMoving(eventTime)) return
             lastBumpTime = eventTime
             val severity = when {
                 magnitude >= SEVERE_THRESHOLD -> 3
                 magnitude >= MEDIUM_THRESHOLD -> 2
                 else -> 1
             }
-            // Without a GPS fix the bump is still saved, with 0,0 meaning "no location".
             val loc = bumpLocation
             bumpCount++
             lastSeverity = severity
@@ -423,13 +430,38 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         // Any fix, including a rough network one, is good enough to mark where a bump happened.
         bumpLocation = location
         gpsStatus = R.string.status_active
-        // Distance and speed only use accurate fixes, so rough network positions don't add fake distance.
-        if (location.hasAccuracy() && location.accuracy > MAX_FIX_ACCURACY_M) return
+        lastFixAt = System.currentTimeMillis()
+        val accurate = !location.hasAccuracy() || location.accuracy <= MAX_FIX_ACCURACY_M
+        val speed = speedMpsFrom(location, if (accurate) lastLocation else null)
+        if (speed != null) {
+            currentSpeedMps = speed
+            speedKmh = speed * 3.6f
+        }
+        // Distance only uses accurate fixes, so rough network positions don't add fake distance.
+        if (!accurate) return
         lastLocation?.let { distanceMeters += it.distanceTo(location) }
         lastLocation = location
-        speedKmh = if (location.hasSpeed()) location.speed * 3.6f else 0f
         refreshScore()
         maybeSaveRoutePoint(location)
+    }
+
+    /** GPS speed in m/s, or distance/time between consecutive fixes when the fix has no speed. */
+    private fun speedMpsFrom(location: Location, previous: Location?): Float? {
+        if (location.hasSpeed()) return location.speed
+        if (previous == null) return null
+        val dtMs = if (location.elapsedRealtimeNanos > 0L && previous.elapsedRealtimeNanos > 0L) {
+            (location.elapsedRealtimeNanos - previous.elapsedRealtimeNanos) / 1_000_000L
+        } else {
+            location.time - previous.time
+        }
+        if (dtMs <= 0L) return null
+        return previous.distanceTo(location) / (dtMs / 1000f)
+    }
+
+    /** True when a fix in the last 5 s shows speed of at least [MIN_SPEED_MPS]. */
+    fun isVehicleMoving(at: Long = System.currentTimeMillis()): Boolean {
+        if (lastFixAt == 0L || at - lastFixAt > STALE_FIX_MS) return false
+        return currentSpeedMps >= MIN_SPEED_MPS
     }
 
     private fun maybeSaveRoutePoint(location: Location) {
@@ -476,6 +508,7 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
 
     fun onGpsProviderDisabled() {
         gpsStatus = R.string.status_gps_off
+        currentSpeedMps = 0f
         speedKmh = 0f
     }
 
@@ -527,6 +560,8 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         const val BUMP_COOLDOWN_MS = 1000L
         const val MAX_FIX_ACCURACY_M = 50f
         const val ROUTE_MIN_SPACING_M = 20f
+        const val MIN_SPEED_MPS = 2.0f // about 7 km/h; below this the vehicle is treated as stopped
+        const val STALE_FIX_MS = 5000L
     }
 }
 
@@ -572,6 +607,16 @@ fun LiveTripScreen(
             text = stringResource(R.string.speed_format, viewModel.speedKmh),
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(top = 12.dp)
+        )
+        Text(
+            text = stringResource(
+                if (viewModel.isVehicleMoving(viewModel.now)) {
+                    R.string.status_moving
+                } else {
+                    R.string.status_stopped_bumps_paused
+                }
+            ),
+            style = MaterialTheme.typography.bodyMedium
         )
         Text(
             text = stringResource(R.string.summary_distance, Fmt.distance(viewModel.distanceMeters)),

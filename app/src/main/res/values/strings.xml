@@ -36,6 +36,8 @@
     <string name="status_gps_off">turned off</string>
     <string name="status_precise_needed">precise location needed</string>
     <string name="status_paused">Paused</string>
+    <string name="status_moving">Moving</string>
+    <string name="status_stopped_bumps_paused">Stopped – bumps paused</string>
     <string name="last_bump_format">Last bump: %1$s</string>
     <string name="severity_none">none yet</string>
     <string name="severity_light">light</string>
