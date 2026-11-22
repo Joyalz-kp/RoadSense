@@ -248,7 +248,12 @@ class LiveTripActivity : ComponentActivity(), SensorEventListener, LocationListe
         viewModel.onLinearAcceleration(sqrt(lx * lx + ly * ly + lz * lz))
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        val type = sensor?.type ?: return
+        if (type != Sensor.TYPE_LINEAR_ACCELERATION && type != Sensor.TYPE_ACCELEROMETER) return
+        viewModel.updateSensorAccuracy(accuracy)
+    }
+
 
     // GPS: trip distance, current speed and bump locations
     override fun onLocationChanged(location: Location) {
@@ -343,6 +348,10 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
         private set
     var gpsStatus by mutableIntStateOf(R.string.status_waiting_fix)
         private set
+    var sensorAccuracy by mutableIntStateOf(SensorManager.SENSOR_STATUS_ACCURACY_HIGH)
+        private set
+    var gpsAccuracyPoor by mutableStateOf(false)
+        private set
     // Ticks once a second so the elapsed trip time counts up on screen.
     var now by mutableLongStateOf(startTime)
         private set
@@ -372,6 +381,10 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
 
     fun updateGpsStatus(@StringRes status: Int) {
         gpsStatus = status
+    }
+
+    fun updateSensorAccuracy(accuracy: Int) {
+        sensorAccuracy = accuracy
     }
 
     fun setInitialBumpLocation(location: Location) {
@@ -446,6 +459,9 @@ class LiveTripViewModel(application: Application) : AndroidViewModel(application
 
     fun onLocationChanged(location: Location) {
         if (ended) return
+        if (location.hasAccuracy()) {
+            gpsAccuracyPoor = location.accuracy > MAX_FIX_ACCURACY_M
+        }
         if (isPaused) {
             // Ignore movement while paused and forget the last point so resume does not jump.
             lastLocation = null
@@ -617,6 +633,20 @@ fun LiveTripScreen(
             ),
             style = MaterialTheme.typography.bodyMedium
         )
+        val sensorLow = viewModel.sensorAccuracy == SensorManager.SENSOR_STATUS_UNRELIABLE ||
+            viewModel.sensorAccuracy == SensorManager.SENSOR_STATUS_ACCURACY_LOW
+        if (sensorLow) {
+            AccuracyWarningCard(
+                text = stringResource(R.string.sensor_accuracy_warning),
+                containerColor = Color(0xFFD32F2F)
+            )
+        }
+        if (viewModel.gpsAccuracyPoor) {
+            AccuracyWarningCard(
+                text = stringResource(R.string.gps_accuracy_warning),
+                containerColor = Color(0xFFF57C00)
+            )
+        }
         Text(
             text = viewModel.bumpCount.toString(),
             style = MaterialTheme.typography.displayMedium,
@@ -702,5 +732,24 @@ fun LiveTripScreen(
                 Text(stringResource(R.string.end_trip))
             }
         }
+    }
+}
+
+@Composable
+private fun AccuracyWarningCard(text: String, containerColor: Color) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = containerColor)
+    ) {
+        Text(
+            text = text,
+            color = Color.White,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        )
     }
 }

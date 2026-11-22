@@ -32,6 +32,8 @@
     <string name="road_quality_fair">Road quality: Fair</string>
     <string name="road_quality_poor">Road quality: Poor</string>
     <string name="sensor_status_format">Accelerometer: %1$s  |  GPS: %2$s</string>
+    <string name="sensor_accuracy_warning">Sensor accuracy is low – readings may be less reliable. Keep the phone mounted firmly.</string>
+    <string name="gps_accuracy_warning">GPS accuracy is low – position may be less precise.</string>
     <string name="status_active">active</string>
     <string name="status_unavailable">unavailable</string>
     <string name="status_waiting_fix">waiting for fix</string>
